@@ -38,6 +38,9 @@ actions rather than adding duplicates. Each turn uses three depth layers
 branches to its actions and they merge into the final response. The final response
 connects to the next prompt. Turns without tools connect prompt directly to final.
 Sessions remain separate. Incomplete turns show only the events received so far.
+The UI draws these connections from each session's ordered turn IDs, including
+pending actions, and combines them with stored edges without duplicates. These
+display connections do not create persistent action records.
 
 Persistence uses your `dotvectordb.ConversationMemoryTree.ConversationMemoryTree`
 class from the installed PyPI package.

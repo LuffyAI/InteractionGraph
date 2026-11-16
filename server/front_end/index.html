@@ -20,13 +20,27 @@ const pre=element('pre');for(const line of change.line_changes||[]){const number
 }else detail.append(element('pre',target.label));
 if(target.event.tool_output)detail.append(element('h3','Tool result'),element('pre',typeof target.event.tool_output==='string'?target.event.tool_output:JSON.stringify(target.event.tool_output,null,2)));
 const raw=element('details');raw.append(element('summary','Raw node JSON'),element('pre',JSON.stringify(target,null,2)));detail.append(raw)}
+function connections(nodes,storedEdges){
+const ids=new Set(nodes.map(n=>n.id)),edges=new Map(),turns=new Map();
+function connect(source,target){if(source&&target&&source!==target&&ids.has(source)&&ids.has(target))edges.set(JSON.stringify([source,target]),{source,target})}
+for(const edge of storedEdges)connect(edge.source,edge.target);
+for(const node of nodes){if(!node.turn_id)continue;if(!turns.has(node.turn_id))turns.set(node.turn_id,[]);turns.get(node.turn_id).push(node)}
+let previousResponse;
+for(const turn of turns.values()){
+const prompt=turn.find(n=>n.action_type==='human_input'),response=turn.find(n=>n.action_type==='assistant_response'),actions=turn.filter(n=>!['human_input','assistant_response'].includes(n.action_type));
+if(prompt)connect(previousResponse?.id,prompt.id);
+if(actions.length){for(const action of actions){connect(prompt?.id,action.id);connect(action.id,response?.id)}}else connect(prompt?.id,response?.id);
+previousResponse=response;
+}
+return [...edges.values()];
+}
 function render(){const nodes=graph.nodes.filter(n=>n.session_id===session),canvas=$('canvas');canvas.replaceChildren();
 if(!nodes.length){const empty=element('div');empty.id='empty';empty.append(element('strong','Waiting for the next prompt'),element('div','Keep this page open and chat in Codex. Nodes appear as events arrive.'));canvas.append(empty);inspect();return}
 const rows=new Map();for(const node of nodes){const layer=(node.depth-1)*3+(node.action_type==='human_input'?0:node.action_type==='assistant_response'?2:1);if(!rows.has(layer))rows.set(layer,[]);rows.get(layer).push(node)}
 const max=Math.max(...Array.from(rows.values(),r=>r.length)),width=Math.max($('viewport').clientWidth,max*294+120),height=(Math.max(...rows.keys())+1)*210+70;canvas.style.width=width+'px';canvas.style.height=height+'px';
 const positions=new Map();for(const [depth,row] of rows){const badge=element('div','DEPTH '+row[0].depth,'depth');badge.style.top=(depth*210+25)+'px';canvas.append(badge);row.forEach((node,i)=>positions.set(node.id,{x:(width-row.length*294+30)/2+i*294,y:depth*210+54}))}
 const svg=document.createElementNS(ns,'svg');svg.setAttribute('width',width);svg.setAttribute('height',height);const defs=document.createElementNS(ns,'defs');const marker=document.createElementNS(ns,'marker');for(const [k,v] of Object.entries({id:'arrow',viewBox:'0 0 10 10',refX:'9',refY:'5',markerWidth:'6',markerHeight:'6',orient:'auto-start-reverse'}))marker.setAttribute(k,v);const arrow=document.createElementNS(ns,'path');arrow.setAttribute('d','M 0 0 L 10 5 L 0 10 z');arrow.setAttribute('fill','#61728b');marker.append(arrow);defs.append(marker);svg.append(defs);
-for(const edge of graph.edges){const a=positions.get(edge.source),b=positions.get(edge.target);if(!a||!b)continue;const path=document.createElementNS(ns,'path');const x=a.x+132,y=a.y+132,X=b.x+132,Y=b.y;path.setAttribute('d',`M ${x} ${y} C ${x} ${(y+Y)/2}, ${X} ${(y+Y)/2}, ${X} ${Y-3}`);path.setAttribute('fill','none');path.setAttribute('stroke','#52627c');path.setAttribute('stroke-width','1.5');path.setAttribute('marker-end','url(#arrow)');svg.append(path)}canvas.append(svg);
+for(const edge of connections(nodes,graph.edges)){const a=positions.get(edge.source),b=positions.get(edge.target);if(!a||!b)continue;const path=document.createElementNS(ns,'path');const x=a.x+132,y=a.y+132,X=b.x+132,Y=b.y;path.setAttribute('d',`M ${x} ${y} C ${x} ${(y+Y)/2}, ${X} ${(y+Y)/2}, ${X} ${Y-3}`);path.setAttribute('fill','none');path.setAttribute('stroke','#91a9cc');path.setAttribute('stroke-width','2');path.setAttribute('marker-end','url(#arrow)');svg.append(path)}canvas.append(svg);
 for(const node of nodes){const p=positions.get(node.id),cls=node.action_type==='human_input'?'person':node.action_type==='assistant_response'?'final':'action',card=element('button',undefined,'node '+cls+(selected===node.id?' selected':''));card.style.left=p.x+'px';card.style.top=p.y+'px';card.append(element('div',node.action_type,'type'),element('div',node.label,'label'),element('div',!['human_input','assistant_response'].includes(node.action_type)?(node.event.change_stage==='reported'?'● reported':'◌ requested'):'depth '+node.depth,'meta'));card.onclick=()=>{selected=node.id;render()};canvas.append(card)}inspect();
 }
 function update(data){graph=data;const picker=$('sessions');picker.replaceChildren();for(const id of graph.sessions){const option=element('option',id==='unknown-session'?'Unknown session':id.slice(0,8)+'…'+id.slice(-5));option.value=id;picker.append(option)}if(!session||!graph.sessions.includes(session))session=graph.sessions.at(-1)||'';picker.value=session;render();const count=graph.nodes.filter(n=>n.session_id===session).length;if($('follow').checked&&count!==lastCount)latest();lastCount=count}
