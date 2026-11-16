@@ -1,6 +1,10 @@
 # Codex conversation logger and live DAG
 
-Python 3.9+ only; no dependencies or OpenAI API key required.
+The receiver uses DotVectorDB's `ConversationMemoryTree` and its dependencies.
+Initialization uses the library's default providers and inherited opening flow;
+configure the environment required by DotVectorDB (including `OPENAI_API_KEY`).
+The HTTP receiver uses `aiohttp`; requests, ingestion, and live streams run on
+one asyncio event loop. The hook sender still uses only Python's standard library.
 
 - `server/server.py`: HTTP receiver, JSON terminal output, and live graph UI.
 - `codex/`: local Codex plugin that sends lifecycle hook events.
@@ -11,7 +15,8 @@ In a terminal on the same machine where Codex executes hooks:
 
 ```bash
 cd /home/x/codex_ent
-python3 server/server.py
+conda activate DotDB
+PYTHONPATH=/home/x/Final_DotVectorDB python server/server.py
 ```
 
 Leave it running. It listens on `http://127.0.0.1:8765/events`.
@@ -25,7 +30,8 @@ Server-Sent Events at `/api/stream`. No frontend build or external libraries are
 required. Select a session, click a node to inspect its evidence and exact line
 changes, and use Follow live to scroll to incoming nodes.
 
-The three node types are PERSON, AI ACTION, and AI FINAL RESPONSE. Each changed
+Nodes use the library's action types: `human_input`, `assistant_response`, and
+the registered tool/file action types. Each changed
 file creates its own action, even when one tool call changes multiple files.
 Calls without file changes create a tool action. Post-tool events update existing
 actions rather than adding duplicates. Each turn uses three depth layers
@@ -34,11 +40,49 @@ branches to its actions and they merge into the final response. The final respon
 connects to the next prompt. Turns without tools connect prompt directly to final.
 Sessions remain separate. Incomplete turns show only the events received so far.
 
-Incoming normalized events are now saved in `server/graph.sqlite3` and replayed
-on restart. History starts when this updated receiver runs; older terminal output
-is not imported automatically. Use `--database /path/to/history.sqlite3` for another
-database or `--database :memory:` to disable persistence. Store the database locally;
-it contains the prompts, tool inputs, and results sent to the logger.
+Persistence uses your `dotvectordb.ConversationMemoryTree.ConversationMemoryTree`
+class from the configured checkout (or an installed package containing it). Set
+`PYTHONPATH` for a checkout. The installed package
+in the current DotDB environment predates this class, so the command above uses
+the newer local source. On another machine, use its checkout path and a Python
+environment with that checkout's dependencies installed.
+
+The default database is
+`server/ConversationHistory/ConversationHistory.db`. Use `--database /path/to/memory`
+to choose a different, dedicated DotVectorDB directory. Nodes are native
+`interaction` records and DAG edges are native `action` records. Nodes and UI labels use `action_type` directly;
+there is no separate node-type classification.
+
+`CodexInteractionGraph` inherits from `ConversationMemoryTree`. Hook events write
+completed interactions using `add_interaction`. Visualization reads existing
+edges through the library; this integration does not generate or save edges.
+Pending tool actions appear in memory for the UI; the tool result is saved once
+when it arrives. Each chat loads once, on first access, through
+`get_all_interactions(session_id)`. Edges are read through
+`get_incident_edges_of_important_node()` for human-input and answer nodes.
+Results are cached separately per conversation, retaining the library's interaction ordering.
+Subsequent snapshots use memory; completed writes update that loaded state
+without reloading history.
+There is no event journal, replay, or duplicate persistent node store. Message
+IDs and session IDs are passed through from Codex. Snapshot depth is the library's
+stored `interaction_depth`; the UI spaces the three node types within each round.
+
+`server/knowledge_graph/CodexInteractionGraph.py` defines `CodexInteractionGraph(ConversationMemoryTree)`, which adds
+event ingestion and UI snapshots using inherited methods.
+It uses `get_conversation()` and `add_conversation()` for each session and the
+library's interaction and incident-edge getters and add methods. Loading and visualizing a chat use its stored edges
+without reconstructing connections from turn IDs. There are no SQL statements
+or direct connection accesses in the integration. Startup uses the inherited
+context-manager lifecycle. No library files are edited.
+
+History persists in the conversation-memory directory and reloads on restart.
+The frontend and HTTP API are unchanged.
+
+Run the tests with the same environment and source:
+
+```bash
+PYTHONPATH=/home/x/Final_DotVectorDB:/home/x/codex_ent/server python -m unittest discover -s server/test -p 'test_*.py'
+```
 
 ## 2. Test the sender before installing
 
@@ -58,32 +102,37 @@ curl http://127.0.0.1:8765/health
 
 ## 3. Register and install the plugin
 
-Run this yourself in your terminal; it adds/updates only the `codex` entry in
-the project's `.agents/plugins/marketplace.json`, preserving other entries:
+Run one command from the project directory:
 
 ```bash
-cd /home/x/codex_ent
-python3 codex/register.py
+python3 codex/register.py --install_plugin
 ```
 
-Restart Codex and open this project. Open the Plugins directory, choose the
-**Codex Local** source (or the existing marketplace name if you already had
-one), and install/enable **codex**. Review and trust its hook commands when
-Codex requests it; installation alone does not trust hooks. Start a new chat
-in this project after installation.
-
-If the app lists the plugin but the runtime discovers no hooks, register the
-catalog with the runtime as well:
+The installer creates the local marketplace catalog (including on a fresh clone),
+registers it with Codex, and installs the plugin. Other catalog entries are preserved.
+It finds `codex` on PATH or the bundled Linux desktop runtime. For another location:
 
 ```bash
-/usr/lib/chatgpt/resources/codex plugin marketplace add /home/x/codex_ent
-/usr/lib/chatgpt/resources/codex plugin add codex@codex-local
+python3 codex/register.py --install_plugin --codex /path/to/codex
 ```
+
+Restart Codex, review and trust the hook commands when prompted, and start a new
+chat. Keep the receiver running separately using the command in section 1.
+For catalog registration only, `python3 codex/register.py` is still available.
+To install the plugin and clone DotVectorDB into the project root, combine the flags:
+
+```bash
+python3 codex/register.py --install_plugin --install_dotvectordb
+```
+
+This option clones the source, installs `requirements.txt` and `requirements-dev.txt`,
+uninstalls the existing `dotvectordb`, cleans old build artifacts, builds the package,
+and installs the resulting wheel. Run it with the Python environment you want to
+use for the server; all Python commands use that same interpreter.
 
 This package uses `.codex-plugin/plugin.json` as its active manifest. On the
 tested desktop build (0.163.0-alpha.10.2), adding a root `plugin.json` caused
-the runtime to miss the hook declarations. `plugin.portable.json` is an inactive
-reference example, not an active manifest.
+the runtime to miss the hook declarations.
 
 ## 4. Test a real conversation
 

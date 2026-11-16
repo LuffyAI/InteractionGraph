@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """Register this plugin in its parent project's local marketplace."""
-import json
-from pathlib import Path
+import argparse
+import subprocess
+from install_helpers import Installer
 
 
 def main():
-    plugin = Path(__file__).resolve().parent
-    project = plugin.parent
-    target = project / ".agents/plugins/marketplace.json"
-    if target.exists():
-        catalog = json.loads(target.read_text())
-    else:
-        catalog = {"name": "codex-local", "interface": {"displayName": "Codex Local"}, "plugins": []}
-    entry = {
-        "name": "codex",
-        "source": {"source": "local", "path": "./codex"},
-        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
-        "category": "Productivity",
-    }
-    entries = catalog.setdefault("plugins", [])
-    entries[:] = [item for item in entries if item.get("name") != "codex"]
-    entries.append(entry)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(catalog, indent=2) + "\n")
-    print(f"Registered codex in {target}")
-    print("Restart Codex, open Plugins, select this local marketplace, and install codex.")
+    """Register the plugin and optionally build and install DotVectorDB."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--install_dotvectordb', action='store_true',
+                        help='Clone DotVectorDB, install its requirements, and build and install it')
+    parser.add_argument('--install_plugin', action='store_true',
+                        help='Register and install the plugin through Codex')
+    parser.add_argument('--codex', help='Path to the Codex executable')
+    args = parser.parse_args()
+    installer = Installer(args.codex)
+    if args.install_dotvectordb:
+        try:
+            installer.install_dotvectordb()
+        except (OSError, subprocess.CalledProcessError) as error:
+            parser.exit(1, f'DotVectorDB installation failed: {error}\n')
+    try:
+        if args.install_plugin:
+            installer.install()
+        else:
+            installer.register()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f'Plugin setup failed: {error}\n')
 
 
 if __name__ == "__main__":

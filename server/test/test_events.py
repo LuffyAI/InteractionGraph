@@ -1,11 +1,26 @@
 import unittest
+import json
 import tempfile
 from pathlib import Path
 
-from events import normalize, patch_changes, FileSnapshots
+from events.events import normalize, patch_changes, FileSnapshots
 
 
 class EventTests(unittest.TestCase):
+    def test_native_message_ids_from_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'conversation.jsonl'
+            items = [('UserMessage', 'native-user-id', None),
+                     ('AgentMessage', 'commentary-id', 'commentary'),
+                     ('AgentMessage', 'native-final-id', 'final_answer')]
+            transcript.write_text(''.join(json.dumps({'type': 'event_msg', 'payload': {
+                'turn_id': 'turn', 'item': {'type': kind, 'id': identifier, 'phase': phase}}}) + '\n'
+                for kind, identifier, phase in items))
+            common = {'turn_id': 'turn', 'transcript_path': str(transcript)}
+            self.assertEqual(normalize(dict(common, hook_event_name='UserPromptSubmit'))['message_id'], 'native-user-id')
+            self.assertEqual(normalize(dict(common, hook_event_name='Stop'))['message_id'], 'native-final-id')
+            self.assertEqual(normalize({'hook_event_name': 'Stop', 'message_id': 'provided-id'})['message_id'], 'provided-id')
+
     def test_snapshot_file_line_numbers_and_no_change(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'a.py'

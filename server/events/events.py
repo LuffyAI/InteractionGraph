@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from collections import OrderedDict
 import time
+import json
 
 
 class FileSnapshots:
@@ -185,6 +186,33 @@ def outcome(response):
     return ""
 
 
+def message_id(event):
+    if event.get('message_id'):
+        return event['message_id']
+    if event.get('hook_event_name') not in ('UserPromptSubmit', 'Stop'):
+        return ''
+    path, turn = event.get('transcript_path'), event.get('turn_id')
+    if not path or not turn:
+        return ''
+    expected = 'UserMessage' if event['hook_event_name'] == 'UserPromptSubmit' else 'AgentMessage'
+    try:
+        with open(path, encoding='utf-8') as stream:
+            found = ''
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                payload = record.get('payload', {})
+                item = payload.get('item', {})
+                if (payload.get('turn_id') == turn and item.get('type') == expected
+                        and (expected == 'UserMessage' or item.get('phase') == 'final_answer')):
+                    found = item.get('id', '')
+            return found
+    except OSError:
+        return ''
+
+
 def normalize(event):
     name = event.get("hook_event_name", "")
     types = {"UserPromptSubmit": "user_message", "Stop": "assistant_message",
@@ -192,6 +220,24 @@ def normalize(event):
              "SessionStart": "session_start", "SessionEnd": "session_end", "Interrupt": "interrupt"}
     inputs = event.get("tool_input", "")
     tool = event.get("tool_name", "")
+    action_type = event.get('action_type', '')
+    if not action_type and event.get('tool_use_id') and event.get('transcript_path'):
+        # Codex records the native item type alongside the hook's tool ID.
+        try:
+            with open(event['transcript_path'], encoding='utf-8') as stream:
+                for line in stream:
+                    try:
+                        payload = json.loads(line).get('payload', {})
+                    except ValueError:
+                        continue
+                    item = payload.get('item', {})
+                    if (payload.get('turn_id') == event.get('turn_id')
+                            and item.get('id') == event['tool_use_id']):
+                        native_type = item.get('kind') if item.get('type') == 'Extension' else item.get('type')
+                        if isinstance(native_type, str):
+                            action_type = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', native_type).lower()
+        except OSError:
+            pass
     response = event.get("tool_response", "")
     message = event.get("prompt", "") if name == "UserPromptSubmit" else event.get("last_assistant_message", "") if name == "Stop" else ""
     return {
@@ -201,6 +247,7 @@ def normalize(event):
         "occurred_at": "",
         "session_id": event.get("session_id") or "",
         "turn_id": event.get("turn_id") or "",
+        "message_id": message_id(event),
         "tool_call_id": event.get("tool_use_id") or "",
         "parent_event_id": "",
         "event_type": types.get(name, ""),
@@ -209,6 +256,7 @@ def normalize(event):
         "cwd": event.get("cwd") or "",
         "message": message or "",
         "tool_name": tool,
+        "action_type": action_type,
         "tool_input": inputs,
         "tool_output": response,
         "status": outcome(response) if name == "PostToolUse" else "",

@@ -1,4 +1,10 @@
 
+.agents/
 __pycache__/
 *.pyc
 server/graph.sqlite3*
+server/conversation_memory/
+server/interaction_memory/
+server/ConversationHistory/*
+!server/ConversationHistory/.gitkeep
+
