@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 
 
 class Installer:
@@ -35,34 +34,6 @@ class Installer:
         print(f"Registered codex in {target}")
         print('Restart Codex, open Plugins, select this local marketplace, and install codex.')
         return catalog['name']
-
-    def install_dotvectordb(self):
-        """Clone DotVectorDB, install dependencies, and build and install its wheel."""
-        repository = self.project / 'DotVectorDB'
-        subprocess.run(['git', 'clone', 'https://github.com/LuffyAI/DotVectorDB.git',
-                        str(repository)], check=True)
-        for requirements in ('requirements.txt', 'requirements-dev.txt'):
-            print(f'==> Installing {requirements}...', flush=True)
-            subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', requirements],
-                           check=True, cwd=repository)
-        print('==> Uninstalling dotvectordb...', flush=True)
-        subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'dotvectordb'],
-                       check=True, cwd=repository)
-        print('==> Cleaning old builds...', flush=True)
-        for path in [repository / 'build', repository / 'dist', *repository.glob('*.egg-info')]:
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            elif path.is_dir():
-                shutil.rmtree(path)
-        print('==> Building package...', flush=True)
-        subprocess.run([sys.executable, '-m', 'build'], check=True, cwd=repository)
-        wheels = sorted((repository / 'dist').glob('*.whl'))
-        if not wheels:
-            raise FileNotFoundError('Build produced no wheel in DotVectorDB/dist')
-        print('==> Installing newly built wheel...', flush=True)
-        subprocess.run([sys.executable, '-m', 'pip', 'install', *map(str, wheels)],
-                       check=True, cwd=repository)
-        print('==> Done.', flush=True)
 
     def find_codex(self):
         """Locate a supplied executable, the CLI, or the bundled Linux runtime."""

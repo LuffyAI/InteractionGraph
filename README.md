@@ -11,12 +11,11 @@ one asyncio event loop. The hook sender still uses only Python's standard librar
 
 ## 1. Start the receiver
 
-In a terminal on the same machine where Codex executes hooks:
+From the project root, in your Python environment:
 
 ```bash
-cd /home/x/codex_ent
-conda activate DotDB
-PYTHONPATH=/home/x/Final_DotVectorDB python server/server.py
+python -m pip install -r requirements.txt
+python server/server.py
 ```
 
 Leave it running. It listens on `http://127.0.0.1:8765/events`.
@@ -41,11 +40,7 @@ connects to the next prompt. Turns without tools connect prompt directly to fina
 Sessions remain separate. Incomplete turns show only the events received so far.
 
 Persistence uses your `dotvectordb.ConversationMemoryTree.ConversationMemoryTree`
-class from the configured checkout (or an installed package containing it). Set
-`PYTHONPATH` for a checkout. The installed package
-in the current DotDB environment predates this class, so the command above uses
-the newer local source. On another machine, use its checkout path and a Python
-environment with that checkout's dependencies installed.
+class from the installed PyPI package.
 
 The default database is
 `server/ConversationHistory/ConversationHistory.db`. Use `--database /path/to/memory`
@@ -58,13 +53,14 @@ completed interactions using `add_interaction`. Visualization reads existing
 edges through the library; this integration does not generate or save edges.
 Pending tool actions appear in memory for the UI; the tool result is saved once
 when it arrives. Each chat loads once, on first access, through
-`get_all_interactions(session_id)`. Edges are read through
+`get_all_interactions(hash(session_id))`. Edges are read through
 `get_incident_edges_of_important_node()` for human-input and answer nodes.
 Results are cached separately per conversation, retaining the library's interaction ordering.
 Subsequent snapshots use memory; completed writes update that loaded state
 without reloading history.
 There is no event journal, replay, or duplicate persistent node store. Message
-IDs and session IDs are passed through from Codex. Snapshot depth is the library's
+Codex session and interaction IDs are converted to integer database keys using
+the inherited `hashing_func.content_hash()`. Original IDs remain in event data. Snapshot depth is the library's
 stored `interaction_depth`; the UI spaces the three node types within each round.
 
 `server/knowledge_graph/CodexInteractionGraph.py` defines `CodexInteractionGraph(ConversationMemoryTree)`, which adds
@@ -78,18 +74,17 @@ context-manager lifecycle. No library files are edited.
 History persists in the conversation-memory directory and reloads on restart.
 The frontend and HTTP API are unchanged.
 
-Run the tests with the same environment and source:
+Run the tests in the same environment:
 
 ```bash
-PYTHONPATH=/home/x/Final_DotVectorDB:/home/x/codex_ent/server python -m unittest discover -s server/test -p 'test_*.py'
+PYTHONPATH=server python -m unittest discover -s server/test -p 'test_*.py'
 ```
 
 ## 2. Test the sender before installing
 
-In another terminal:
+From the project root in another terminal:
 
 ```bash
-cd /home/x/codex_ent
 printf '%s\n' '{"hook_event_name":"UserPromptSubmit","session_id":"smoke-test","prompt":"Hello from Codex"}' | python3 codex/hooks/send_event.py
 ```
 
@@ -119,16 +114,6 @@ python3 codex/register.py --install_plugin --codex /path/to/codex
 Restart Codex, review and trust the hook commands when prompted, and start a new
 chat. Keep the receiver running separately using the command in section 1.
 For catalog registration only, `python3 codex/register.py` is still available.
-To install the plugin and clone DotVectorDB into the project root, combine the flags:
-
-```bash
-python3 codex/register.py --install_plugin --install_dotvectordb
-```
-
-This option clones the source, installs `requirements.txt` and `requirements-dev.txt`,
-uninstalls the existing `dotvectordb`, cleans old build artifacts, builds the package,
-and installs the resulting wheel. Run it with the Python environment you want to
-use for the server; all Python commands use that same interpreter.
 
 This package uses `.codex-plugin/plugin.json` as its active manifest. On the
 tested desktop build (0.163.0-alpha.10.2), adding a root `plugin.json` caused

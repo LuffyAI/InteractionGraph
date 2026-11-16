@@ -8,3 +8,4 @@ server/interaction_memory/
 server/ConversationHistory/*
 !server/ConversationHistory/.gitkeep
 
+.env
