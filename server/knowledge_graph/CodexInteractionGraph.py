@@ -17,7 +17,7 @@ class CodexInteractionGraph(ConversationMemoryTree):
         if self._registered_types is None:
             self._registered_types = await self.get_action_types()
         if conversation_id not in self._rows:
-            rows = await self.get_all_interactions(conversation_id)
+            rows = await self.get_all_interactions(self.hashing_func.content_hash(conversation_id))
             self._rows[conversation_id] = {str(row['interaction_id']): row for row in rows}
             self._actions[conversation_id] = {}
             for row in rows:
@@ -50,11 +50,12 @@ class CodexInteractionGraph(ConversationMemoryTree):
                         'user_message', 'assistant_message', 'tool_call', 'tool_result'))
 
     async def _get_or_create_conversation(self, session):
-        """Find or create this chat using the inherited conversation methods."""
-        conversation = await self.get_conversation(session)
+        """Find or create this chat using the library's hash of its Codex ID."""
+        conversation_id = self.hashing_func.content_hash(session)
+        conversation = await self.get_conversation(conversation_id)
         if conversation is None:
-            await self.add_conversation(session)
-            conversation = await self.get_conversation(session)
+            await self.add_conversation(conversation_id)
+            conversation = await self.get_conversation(conversation_id)
         return conversation
 
     @staticmethod
@@ -87,9 +88,11 @@ class CodexInteractionGraph(ConversationMemoryTree):
     async def _store_entries(self, event, entries, conversation):
         """Keep pending actions in memory and save finished interactions once."""
         session, kind = event['session_id'], event['event_type']
+        conversation_id = self.hashing_func.content_hash(session)
         saved = self._rows[session]
         for interaction_id, role, payload in entries:
-            interaction_id = str(interaction_id)
+            stored_id = self.hashing_func.content_hash(interaction_id)
+            interaction_id = str(stored_id)
             node = dict(payload, id=interaction_id, session_id=session,
                         turn_id=event['turn_id'], event=event, action_type=role)
             if interaction_id in saved:
@@ -100,11 +103,11 @@ class CodexInteractionGraph(ConversationMemoryTree):
                 continue
             if role not in self._registered_types:
                 raise ValueError(f'Codex action type {role!r} is not registered in ConversationMemoryTree.')
-            await self.add_interaction(interaction_id, session, role, json.dumps(node))
+            await self.add_interaction(stored_id, conversation_id, role, json.dumps(node))
             depth = conversation['interaction_depth']
-            conversation = await self.get_conversation(session)
+            conversation = await self.get_conversation(conversation_id)
             self._rows[session][interaction_id] = {
-                'interaction_id': interaction_id, 'conversation_id': session,
+                'interaction_id': stored_id, 'conversation_id': conversation_id,
                 'interaction_number': conversation['global_interaction_count'],
                 'interaction_depth': depth, 'action_type': role, 'content': json.dumps(node),
             }
@@ -114,7 +117,7 @@ class CodexInteractionGraph(ConversationMemoryTree):
         """Read existing incident edges for important nodes; never create connections."""
         for interaction_id, role, _ in entries:
             if role in ('human_input', 'assistant_response'):
-                await self._load_incident_edges(session, str(interaction_id))
+                await self._load_incident_edges(session, self.hashing_func.content_hash(interaction_id))
 
     async def snapshot(self, conversation_id=None):
         """Return UI nodes and edges for one chat or all currently loaded chats.

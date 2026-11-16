@@ -1,6 +1,8 @@
 import asyncio
 import json
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -35,6 +37,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         with patch('builtins.print'):
             response = await self.client.post('/events', json={
                 'hook_event_name': 'UserPromptSubmit', 'session_id': 'test', 'prompt': 'hello',
+                'message_id': 'native-message',
             })
         self.assertEqual(response.status, 200)
         update = await asyncio.wait_for(stream.content.readline(), 1)
@@ -54,3 +57,28 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             response = await small_client.post('/events', data='x' * 9)
             self.assertEqual(response.status, 413)
         self.graph.ingest.assert_not_awaited()
+
+    async def test_prompt_waits_for_native_message_id_before_ingestion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'transcript.jsonl'
+            transcript.touch()
+            prompt = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'test',
+                      'turn_id': 'turn', 'prompt': 'hello', 'transcript_path': str(transcript)}
+            with patch('builtins.print'):
+                response = await self.client.post('/events', json=prompt)
+            self.assertEqual(response.status, 200)
+            self.graph.ingest.assert_not_awaited()
+            self.assertEqual(len(self.receiver.pending_messages), 1)
+            transcript.write_text(json.dumps({'payload': {'turn_id': 'turn', 'item': {
+                'type': 'UserMessage', 'id': 'native-prompt-id',
+            }}}) + '\n')
+            with patch('builtins.print'):
+                response = await self.client.post('/events', json={
+                    'hook_event_name': 'Stop', 'session_id': 'test', 'turn_id': 'turn',
+                    'message_id': 'native-answer-id', 'last_assistant_message': 'hello back',
+                })
+            self.assertEqual(response.status, 200)
+            records = [call.args[0] for call in self.graph.ingest.await_args_list]
+            self.assertEqual([record['message_id'] for record in records],
+                             ['native-prompt-id', 'native-answer-id'])
+            self.assertEqual(self.receiver.pending_messages, {})

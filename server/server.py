@@ -3,9 +3,9 @@
 import argparse
 import asyncio
 from pathlib import Path
-
 from events.EventServer import EventServer
-
+from dotenv import load_dotenv
+load_dotenv()
 
 async def main():
     """Parse command-line arguments and start the event server."""

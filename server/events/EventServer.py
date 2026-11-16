@@ -6,7 +6,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from events.events import normalize, FileSnapshots
+from events.events import normalize, message_id, FileSnapshots
 from knowledge_graph.CodexInteractionGraph import CodexInteractionGraph
 
 MAX_BODY = 16 * 1024 * 1024
@@ -20,6 +20,7 @@ class EventServer:
         self.revision = revision
         self.condition = asyncio.Condition()
         self.snapshots = FileSnapshots()
+        self.pending_messages = {}
 
     def application(self):
         """Build the HTTP application with a bounded event body size."""
@@ -60,7 +61,16 @@ class EventServer:
         async with self.condition:
             record = normalize(event)
             self.snapshots.enrich(record)
-            await self.graph.ingest(record)
+            for key, pending in list(self.pending_messages.items()):
+                pending['message_id'] = message_id(pending['raw_event'])
+                if pending['message_id']:
+                    await self.graph.ingest(pending)
+                    del self.pending_messages[key]
+            if record['event_type'] in ('user_message', 'assistant_message') and not record['message_id']:
+                key = (record['session_id'], record['turn_id'], record['event_type'])
+                self.pending_messages[key] = record
+            else:
+                await self.graph.ingest(record)
             self.revision = (await self.graph.snapshot())['revision']
             self.condition.notify_all()
             print(json.dumps(record, ensure_ascii=False), flush=True)

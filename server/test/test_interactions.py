@@ -2,6 +2,7 @@ import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from dotvectordb.plugins.hash_functions.hashfuncs import SHA256HashingFunc
 from dotvectordb.ConversationMemoryTree import ConversationMemoryTree
 from dotvectordb.construction_prompts.ConversationMemoryPrompts import DEFAULT_CHATGPT_ACTION_TYPES
 from knowledge_graph.CodexInteractionGraph import CodexInteractionGraph
@@ -11,6 +12,8 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         with patch.object(ConversationMemoryTree, '__init__', return_value=None):
             self.graph = CodexInteractionGraph('memory')
+        self.graph.hashing_func = SHA256HashingFunc()
+        self.hash = self.graph.hashing_func.content_hash
         self.rows, self.actions = [], []
         self.graph.get_conversation = AsyncMock(side_effect=lambda session: {
             'conversation_id': session, 'interaction_depth': 7, 'global_interaction_count': len(self.rows)})
@@ -53,8 +56,8 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         graph = await self.graph.snapshot()
         self.assertEqual(len(graph['nodes']), 4)
         self.assertEqual(len(graph['edges']), 0)
-        self.assertEqual(self.rows[0]['interaction_id'], 'message-user_message')
-        self.assertTrue(all(r['conversation_id'] == 'session-id' for r in self.rows))
+        self.assertEqual(self.rows[0]['interaction_id'], self.hash('message-user_message'))
+        self.assertTrue(all(r['conversation_id'] == self.hash('session-id') for r in self.rows))
         await self.graph.ingest(self.event('assistant_message'))
         self.assertEqual(len(self.rows), 4)
         self.graph.add_action.assert_not_awaited()
@@ -62,7 +65,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_creates_conversation_through_library(self):
         self.graph.get_conversation.side_effect = [None, {'interaction_depth':1}, {'interaction_depth':1, 'global_interaction_count':1}]
         await self.graph.ingest(self.event('user_message'))
-        self.graph.add_conversation.assert_awaited_once_with('session-id')
+        self.graph.add_conversation.assert_awaited_once_with(self.hash('session-id'))
 
     async def test_repeated_snapshots_and_ingestion_do_not_reload_history(self):
         await self.graph.ingest(self.event('user_message'))
@@ -72,7 +75,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.graph.snapshot()
         await self.graph.ingest(self.event('tool_result', tool_call_id='call'))
         snapshot = await self.graph.snapshot()
-        self.graph.get_all_interactions.assert_awaited_once_with('session-id')
+        self.graph.get_all_interactions.assert_awaited_once_with(self.hash('session-id'))
         self.graph.get_all_actions.assert_not_awaited()
         self.assertEqual(len(snapshot['nodes']), 2)
         self.assertEqual(len(snapshot['edges']), 0)
@@ -85,12 +88,12 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         first = await self.graph.snapshot('session-id')
         second = await self.graph.snapshot('other-chat')
         await self.graph.snapshot('session-id')
-        self.assertEqual([n['id'] for n in first['nodes']], ['message-user_message'])
-        self.assertEqual([n['id'] for n in second['nodes']], ['other-message'])
+        self.assertEqual([n['id'] for n in first['nodes']], [str(self.hash('message-user_message'))])
+        self.assertEqual([n['id'] for n in second['nodes']], [str(self.hash('other-message'))])
         self.assertEqual(self.graph.get_all_interactions.await_count, 2)
         self.graph.get_all_actions.assert_not_awaited()
         self.assertEqual([c.args for c in self.graph.get_all_interactions.await_args_list],
-                         [('session-id',), ('other-chat',)])
+                         [(self.hash('session-id'),), (self.hash('other-chat'),)])
 
     async def test_uses_registered_types_without_guessing_from_tool_name(self):
         event = self.event('tool_result', tool_call_id='native-call', tool_name='anything')
@@ -106,19 +109,33 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         for identifier, role, kind in [('human', 'human_input', 'human_input'),
                                        ('middle', 'command_execution', 'command_execution'),
                                        ('answer', 'assistant_response', 'assistant_response')]:
-            node = {'id':identifier, 'label':identifier, 'session_id':'stored',
+            node = {'id':str(self.hash(identifier)), 'label':identifier, 'session_id':'stored',
                     'turn_id':identifier, 'event':{'event_id':identifier}, 'action_type':role}
-            self.rows.append({'interaction_id':identifier, 'conversation_id':'stored',
+            self.rows.append({'interaction_id':self.hash(identifier), 'conversation_id':self.hash('stored'),
                               'action_type':role, 'content':json.dumps(node),
                               'interaction_number':len(self.rows)+1, 'interaction_depth':1})
         self.actions.extend([
-            {'action_id':1, 'src_interaction':'human', 'dst_interaction':'middle'},
-            {'action_id':2, 'src_interaction':'middle', 'dst_interaction':'answer'}])
+            {'action_id':1, 'src_interaction':self.hash('human'), 'dst_interaction':self.hash('middle')},
+            {'action_id':2, 'src_interaction':self.hash('middle'), 'dst_interaction':self.hash('answer')}])
         graph = await self.graph.snapshot('stored')
-        self.assertEqual(graph['edges'], [{'source':'human', 'target':'middle'},
-                                          {'source':'middle', 'target':'answer'}])
+        self.assertEqual(graph['edges'], [{'source':str(self.hash('human')), 'target':str(self.hash('middle'))},
+                                          {'source':str(self.hash('middle')), 'target':str(self.hash('answer'))}])
         self.assertEqual([c.args for c in self.graph.get_incident_edges_of_important_node.await_args_list],
-                         [('human',), ('answer',)])
+                         [(self.hash('human'),), (self.hash('answer'),)])
         self.graph.add_action.assert_not_awaited()
         await self.graph.snapshot('stored')
         self.assertEqual(self.graph.get_incident_edges_of_important_node.await_count, 2)
+
+    async def test_hashes_native_ids_to_sqlite_integers_and_keeps_original_event(self):
+        event = self.event('user_message')
+        event.update(session_id='01a1cc62-6087-74e2-a5fa-dd4c23cd1554',
+                     message_id='msg_native_codex_id')
+        await self.graph.ingest(event)
+        identifier, conversation, _, content = self.graph.add_interaction.await_args.args
+        self.assertEqual(identifier, self.hash(event['message_id']))
+        self.assertEqual(conversation, self.hash(event['session_id']))
+        for value in (identifier, conversation):
+            self.assertIsInstance(value, int)
+            self.assertTrue(-(2 ** 63) <= value < 2 ** 63)
+        self.assertEqual(json.loads(content)['event'], event)
+        self.graph.get_incident_edges_of_important_node.assert_awaited_once_with(identifier)
