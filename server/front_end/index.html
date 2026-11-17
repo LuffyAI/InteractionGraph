@@ -12,12 +12,54 @@
 let graph={nodes:[],edges:[],sessions:[]}, session='',selected='',lastCount=0;
 const $=id=>document.getElementById(id), ns='http://www.w3.org/2000/svg';
 function element(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el}
+function stepSummary(node){if(['human_input','assistant_response'].includes(node.action_type))return node.event?.message??node.label;
+const d=node.description;if(!d)return node.label;
+return d.current_action_summary||node.label}
+function actualContent(target,detail){
+const event=target.event||{},isMessage=['human_input','assistant_response'].includes(target.action_type);
+if(isMessage){detail.append(element('h3',target.action_type==='human_input'?'Sent input':'Final response'),element('pre',event.message??target.label??''));return}
+detail.append(element('h3','Actual action'),element('p',event.tool_name||target.label||'Not recorded.'));
+const input=event.tool_input;
+detail.append(element('pre',input===undefined||input===null||input===''?'No action input recorded.':typeof input==='string'?input:JSON.stringify(input,null,2)));
+}
+function descriptionSections(target,detail){
+const d=target.description||{},empty=target.description_status==='pending'?'Awaiting analysis…':'Not available for this node.';
+function textSection(title,value){detail.append(element('h3',title),element('p',typeof value==='string'&&value.trim()?value:empty,typeof value==='string'&&value.trim()?'':'muted'))}
+function listSection(title,values){detail.append(element('h3',title));if(Array.isArray(values)&&values.length){const list=element('ul');for(const value of values)list.append(element('li',value));detail.append(list)}else detail.append(element('p',Array.isArray(values)?'None recorded.':empty,'muted'))}
+if(target.action_type==='human_input'){
+textSection('Progress summary',d.current_prompt_interpretation||target.label);
+listSection('Offloaded tasks',d.current_offloaded_tasks);
+textSection('History interpretation',d.history_interpretation);
+}else if(target.action_type==='assistant_response'){
+detail.append(element('h3','Task response visibility'));
+if(Array.isArray(d.TaskClarity)&&d.TaskClarity.length){for(const task of d.TaskClarity){
+detail.append(element('h4',task.task_num===undefined?'Task':'Task '+task.task_num));
+textSection('Visibility overview',task.response_visibility_overview);
+detail.append(element('p','Visibility score: '+(typeof task.response_visibility_score==='number'?task.response_visibility_score+' / 100':'Not available')));
+listSection('Missing information',task.missing_info);
+}}else detail.append(element('p',empty,'muted'));
+}else{
+textSection('Action summary',d.current_action_summary||target.label);
+textSection('Previous tasks and prompt interpretation',d.previous_tasks_and_prompt_interpretation);
+detail.append(element('h3','Offloaded task progress'));
+if(Array.isArray(d.offloaded_task_progress)&&d.offloaded_task_progress.length){for(const task of d.offloaded_task_progress){
+detail.append(element('h4',task.task_num===undefined?'Task':'Task '+task.task_num),element('p',task.task_update||empty));
+detail.append(element('p','Worked on: '+(task.worked_on===true?'Yes':task.worked_on===false?'No':'Not available'),'muted'));
+}}else detail.append(element('p',Array.isArray(d.offloaded_task_progress)?'None recorded.':empty,'muted'));
+listSection('New tasks',d.new_tasks);
+}
+}
 function latest(){const view=$('viewport');view.scrollTop=view.scrollHeight;view.scrollLeft=(view.scrollWidth-view.clientWidth)/2}
 function inspect(){const target=graph.nodes.find(n=>n.id===selected),detail=$('detail');detail.replaceChildren();if(!target){detail.textContent='Select a node to inspect its message, file changes, and exact line numbers.';return}
 detail.append(element('h2',target.action_type),element('p','Depth '+target.depth+' · '+target.event.change_stage));
+actualContent(target,detail);
+descriptionSections(target,detail);
+if(target.description_status==='pending')detail.append(element('p','Summarizing…','muted'));
+if(target.description_status==='error')detail.append(element('p','Analysis unavailable for this step.','muted'));
+if(target.description){const analysis=element('details');analysis.append(element('summary','Task progress details'),element('pre',JSON.stringify(target.description,null,2)));detail.append(analysis)}
 if(target.file_change){const change=target.file_change;detail.append(element('p',change.path));detail.append(element('p',change.line_changes_source==='filesystem_snapshots'?'Observed file changes':'Requested changes / patch evidence','muted'));
 const pre=element('pre');for(const line of change.line_changes||[]){const number=line.type==='added'?line.new_line:line.old_line;pre.append(element('div',(line.type==='added'?'+':'−')+' '+(number??'?')+'  '+line.text,line.type))}if(!pre.childNodes.length)pre.textContent='No changed lines recorded.';detail.append(pre);
-}else detail.append(element('pre',target.label));
+}
 if(target.event.tool_output)detail.append(element('h3','Tool result'),element('pre',typeof target.event.tool_output==='string'?target.event.tool_output:JSON.stringify(target.event.tool_output,null,2)));
 const raw=element('details');raw.append(element('summary','Raw node JSON'),element('pre',JSON.stringify(target,null,2)));detail.append(raw)}
 function connections(nodes,storedEdges){
@@ -41,7 +83,7 @@ const max=Math.max(...Array.from(rows.values(),r=>r.length)),width=Math.max($('v
 const positions=new Map();for(const [depth,row] of rows){const badge=element('div','DEPTH '+row[0].depth,'depth');badge.style.top=(depth*210+25)+'px';canvas.append(badge);row.forEach((node,i)=>positions.set(node.id,{x:(width-row.length*294+30)/2+i*294,y:depth*210+54}))}
 const svg=document.createElementNS(ns,'svg');svg.setAttribute('width',width);svg.setAttribute('height',height);const defs=document.createElementNS(ns,'defs');const marker=document.createElementNS(ns,'marker');for(const [k,v] of Object.entries({id:'arrow',viewBox:'0 0 10 10',refX:'9',refY:'5',markerWidth:'6',markerHeight:'6',orient:'auto-start-reverse'}))marker.setAttribute(k,v);const arrow=document.createElementNS(ns,'path');arrow.setAttribute('d','M 0 0 L 10 5 L 0 10 z');arrow.setAttribute('fill','#61728b');marker.append(arrow);defs.append(marker);svg.append(defs);
 for(const edge of connections(nodes,graph.edges)){const a=positions.get(edge.source),b=positions.get(edge.target);if(!a||!b)continue;const path=document.createElementNS(ns,'path');const x=a.x+132,y=a.y+132,X=b.x+132,Y=b.y;path.setAttribute('d',`M ${x} ${y} C ${x} ${(y+Y)/2}, ${X} ${(y+Y)/2}, ${X} ${Y-3}`);path.setAttribute('fill','none');path.setAttribute('stroke','#91a9cc');path.setAttribute('stroke-width','2');path.setAttribute('marker-end','url(#arrow)');svg.append(path)}canvas.append(svg);
-for(const node of nodes){const p=positions.get(node.id),cls=node.action_type==='human_input'?'person':node.action_type==='assistant_response'?'final':'action',card=element('button',undefined,'node '+cls+(selected===node.id?' selected':''));card.style.left=p.x+'px';card.style.top=p.y+'px';card.append(element('div',node.action_type,'type'),element('div',node.label,'label'),element('div',!['human_input','assistant_response'].includes(node.action_type)?(node.event.change_stage==='reported'?'● reported':'◌ requested'):'depth '+node.depth,'meta'));card.onclick=()=>{selected=node.id;render()};canvas.append(card)}inspect();
+for(const node of nodes){const p=positions.get(node.id),cls=node.action_type==='human_input'?'person':node.action_type==='assistant_response'?'final':'action',card=element('button',undefined,'node '+cls+(selected===node.id?' selected':''));card.style.left=p.x+'px';card.style.top=p.y+'px';card.append(element('div',node.action_type,'type'),element('div',stepSummary(node),'label'),element('div',!['human_input','assistant_response'].includes(node.action_type)?(node.event.change_stage==='reported'?'● reported':'◌ requested'):'depth '+node.depth,'meta'));card.title=stepSummary(node)+(node.description_status==='pending'?' — Summarizing…':node.description_status==='error'?' — Summary unavailable':'');card.onclick=()=>{selected=node.id;render()};canvas.append(card)}inspect();
 }
 function update(data){graph=data;const picker=$('sessions');picker.replaceChildren();for(const id of graph.sessions){const option=element('option',id==='unknown-session'?'Unknown session':id.slice(0,8)+'…'+id.slice(-5));option.value=id;picker.append(option)}if(!session||!graph.sessions.includes(session))session=graph.sessions.at(-1)||'';picker.value=session;render();const count=graph.nodes.filter(n=>n.session_id===session).length;if($('follow').checked&&count!==lastCount)latest();lastCount=count}
 $('sessions').onchange=e=>{session=e.target.value;selected='';render();latest()};$('latest').onclick=latest;window.addEventListener('resize',render);

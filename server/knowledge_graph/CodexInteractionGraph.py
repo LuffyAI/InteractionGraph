@@ -1,5 +1,6 @@
 """Live presentation of Codex events stored through ConversationMemoryTree."""
 import json
+import logging
 from pathlib import Path
 from dotvectordb.ConversationMemoryTree import ConversationMemoryTree
 
@@ -11,6 +12,9 @@ class CodexInteractionGraph(ConversationMemoryTree):
         self._rows = {}
         self._actions = {}
         self._registered_types = None
+        self._descriptions = {}
+        self._description_status = {}
+        self._description_queue = []
 
     async def load(self, conversation_id):
         """Load a chat's ordered interactions and edges once through the library getters."""
@@ -21,6 +25,10 @@ class CodexInteractionGraph(ConversationMemoryTree):
             self._rows[conversation_id] = {str(row['interaction_id']): row for row in rows}
             self._actions[conversation_id] = {}
             for row in rows:
+                if row.get('is_described'):
+                    description = await self.get_interaction_description(row['interaction_id'])
+                    if description:
+                        self._descriptions[str(row['interaction_id'])] = json.loads(description['description'])
                 if row['action_type'] in ('human_input', 'assistant_response'):
                     await self._load_incident_edges(conversation_id, row['interaction_id'])
 
@@ -112,6 +120,42 @@ class CodexInteractionGraph(ConversationMemoryTree):
                 'interaction_depth': depth, 'action_type': role, 'content': json.dumps(node),
             }
             self.pending.pop((session, interaction_id), None)
+            self._description_status[interaction_id] = 'pending'
+            self._description_queue.append((session, interaction_id))
+
+    async def describe_pending(self, notify):
+        """Describe saved steps in order using the inherited default LLM and persistence."""
+        while self._description_queue:
+            session, identifier = self._description_queue.pop(0)
+            row = self._rows[session][identifier]
+
+            async def describe(interaction):
+                role = interaction['action_type']
+                context = interaction
+                if role != 'human_input':
+                    # The default intermediate/final prompts expect the human input
+                    # and preceding actions, rather than one interaction dictionary.
+                    turn = json.loads(interaction['content'])['turn_id']
+                    context = []
+                    for candidate in self._rows[session].values():
+                        if json.loads(candidate['content'])['turn_id'] == turn:
+                            context.append(candidate)
+                        if candidate['interaction_id'] == interaction['interaction_id']:
+                            break
+                    if not any(n['action_type'] == 'human_input' for n in context):
+                        raise ValueError('Waiting for the original prompt to describe this step.')
+                response, *_ = await self.default_llm_func(context, role)
+                return json.dumps(response)
+
+            try:
+                description = await self.describe_interaction(
+                    row['conversation_id'], row['interaction_id'], describe)
+                self._descriptions[identifier] = json.loads(description)
+                self._description_status[identifier] = 'ready'
+            except Exception:
+                logging.exception('Could not describe interaction %s', identifier)
+                self._description_status[identifier] = 'error'
+            await notify()
 
     async def _refresh_important_nodes(self, session, entries):
         """Read existing incident edges for important nodes; never create connections."""
@@ -134,13 +178,16 @@ class CodexInteractionGraph(ConversationMemoryTree):
         for row in rows:
             node = json.loads(row['content'])
             node['depth'] = row['interaction_depth']
+            node['description'] = self._descriptions.get(node['id'])
+            node['description_status'] = self._description_status.get(
+                node['id'], 'ready' if node['description'] else '')
             nodes.append(node)
         saved_ids = {n['id'] for n in nodes}
         nodes.extend(n for n in self.pending.values() if n['session_id'] in sessions and n['id'] not in saved_ids)
         edges = [{'source': str(a['src_interaction']), 'target': str(a['dst_interaction'])}
                  for session in sessions for a in self._actions[session].values()]
         return {
-            'revision': json.dumps([[n['event']['event_id'] for n in nodes], edges], sort_keys=True),
+            'revision': json.dumps([[ [n['event']['event_id'], n.get('description'), n.get('description_status')] for n in nodes], edges], sort_keys=True),
             'nodes': nodes, 'edges': edges,
             'sessions': list(dict.fromkeys(n['session_id'] for n in nodes)),
         }

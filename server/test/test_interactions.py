@@ -67,6 +67,57 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await self.graph.ingest(self.event('user_message'))
         self.graph.add_conversation.assert_awaited_once_with(self.hash('session-id'))
 
+    async def test_live_descriptions_use_default_llm_with_ordered_turn_context(self):
+        self.graph.default_llm_func = AsyncMock(side_effect=[
+            ({'current_prompt_interpretation': 'Build the feature'}, 1, 1, 0),
+            ({'current_action_summary': 'Updated the file'}, 1, 1, 0),
+            ({'TaskClarity': []}, 1, 1, 0),
+        ])
+        async def describe(conversation, identifier, callback):
+            row = next(r for r in self.rows if r['interaction_id'] == identifier)
+            return await callback(row)
+        self.graph.describe_interaction = AsyncMock(side_effect=describe)
+        notify = AsyncMock()
+        await self.graph.ingest(self.event('user_message'))
+        await self.graph.ingest(self.event('tool_call', tool_call_id='call'))
+        before = await self.graph.snapshot()
+        await self.graph.describe_pending(notify)
+        self.assertEqual(self.graph.describe_interaction.await_count, 1)
+        await self.graph.ingest(self.event('tool_result', tool_call_id='call'))
+        await self.graph.ingest(self.event('assistant_message'))
+        await self.graph.describe_pending(notify)
+        calls = self.graph.default_llm_func.await_args_list
+        self.assertEqual(calls[0].args[0]['action_type'], 'human_input')
+        self.assertEqual([r['action_type'] for r in calls[1].args[0]],
+                         ['human_input', 'command_execution'])
+        self.assertEqual([r['action_type'] for r in calls[2].args[0]],
+                         ['human_input', 'command_execution', 'assistant_response'])
+        after = await self.graph.snapshot()
+        self.assertNotEqual(before['revision'], after['revision'])
+        self.assertEqual(after['nodes'][1]['description']['current_action_summary'], 'Updated the file')
+        self.assertTrue(all(n['description_status'] == 'ready' for n in after['nodes']))
+        await self.graph.ingest(self.event('assistant_message'))
+        await self.graph.describe_pending(notify)
+        self.assertEqual(self.graph.describe_interaction.await_count, 3)
+
+    async def test_description_failure_preserves_node_and_continues(self):
+        await self.graph.ingest(self.event('user_message'))
+        self.graph.describe_interaction = AsyncMock(side_effect=RuntimeError('provider unavailable'))
+        with self.assertLogs(level='ERROR'):
+            await self.graph.describe_pending(AsyncMock())
+        snapshot = await self.graph.snapshot()
+        self.assertEqual(len(snapshot['nodes']), 1)
+        self.assertEqual(snapshot['nodes'][0]['description_status'], 'error')
+
+    async def test_load_restores_saved_description(self):
+        await self.graph.ingest(self.event('user_message'))
+        self.rows[0]['is_described'] = True
+        self.graph._rows.clear()
+        self.graph.get_interaction_description = AsyncMock(return_value={
+            'description': json.dumps({'current_prompt_interpretation': 'Saved summary'})})
+        snapshot = await self.graph.snapshot('session-id')
+        self.assertEqual(snapshot['nodes'][0]['description']['current_prompt_interpretation'], 'Saved summary')
+
     async def test_repeated_snapshots_and_ingestion_do_not_reload_history(self):
         await self.graph.ingest(self.event('user_message'))
         await self.graph.snapshot()

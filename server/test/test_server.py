@@ -58,6 +58,32 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 413)
         self.graph.ingest.assert_not_awaited()
 
+    async def test_slow_description_does_not_block_hooks_and_publishes_when_ready(self):
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def describe(notify):
+            started.set()
+            await finish.wait()
+            self.state['revision'] = 'summary-ready'
+            await notify()
+        self.graph.describe_pending.side_effect = describe
+        stream = await self.client.get('/api/stream')
+        await stream.content.readline()
+        await stream.content.readline()
+        with patch('builtins.print'):
+            response = await self.client.post('/events', json={
+                'hook_event_name': 'UserPromptSubmit', 'session_id': 'test',
+                'turn_id': 'turn', 'message_id': 'prompt', 'prompt': 'hello'})
+        self.assertEqual(response.status, 200)
+        await asyncio.wait_for(started.wait(), 1)
+        health = await asyncio.wait_for(self.client.get('/health'), 1)
+        self.assertEqual(health.status, 200)
+        snapshot = await asyncio.wait_for(self.client.get('/api/graph'), 1)
+        self.assertEqual((await snapshot.json())['revision'], 'initial')
+        finish.set()
+        update = await asyncio.wait_for(stream.content.readline(), 1)
+        self.assertEqual(json.loads(update.decode()[6:])['revision'], 'summary-ready')
+        stream.close()
+
     async def test_prompt_waits_for_native_message_id_before_ingestion(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / 'transcript.jsonl'

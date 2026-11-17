@@ -2,6 +2,7 @@
 import asyncio
 import json
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 from aiohttp import web
@@ -21,10 +22,12 @@ class EventServer:
         self.condition = asyncio.Condition()
         self.snapshots = FileSnapshots()
         self.pending_messages = {}
+        self.description_requested = asyncio.Event()
 
     def application(self):
         """Build the HTTP application with a bounded event body size."""
         app = web.Application(client_max_size=MAX_BODY)
+        app.cleanup_ctx.append(self.description_worker)
         app.add_routes([
             web.get('/', self.index),
             web.get('/api/graph', self.snapshot),
@@ -33,6 +36,25 @@ class EventServer:
             web.post('/events', self.receive),
         ])
         return app
+
+    async def description_worker(self, app):
+        """Publish summaries independently of hook ingestion and cancel on shutdown."""
+        async def notify():
+            async with self.condition:
+                self.revision = (await self.graph.snapshot())['revision']
+                self.condition.notify_all()
+
+        async def work():
+            while True:
+                await self.description_requested.wait()
+                self.description_requested.clear()
+                await self.graph.describe_pending(notify)
+
+        task = asyncio.create_task(work())
+        yield
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     async def index(self, request):
         """Serve the graph interface."""
@@ -73,6 +95,7 @@ class EventServer:
                 await self.graph.ingest(record)
             self.revision = (await self.graph.snapshot())['revision']
             self.condition.notify_all()
+            self.description_requested.set()
             print(json.dumps(record, ensure_ascii=False), flush=True)
         return web.json_response({'ok': True})
 
