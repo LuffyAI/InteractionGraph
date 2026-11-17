@@ -8,6 +8,8 @@ from collections import OrderedDict
 import time
 import json
 
+from events.action_types import action_type_for_item, normalize_action_type
+
 
 class FileSnapshots:
     """Observe local files around paired tool events; never infer missing snapshots."""
@@ -220,7 +222,8 @@ def normalize(event):
              "SessionStart": "session_start", "SessionEnd": "session_end", "Interrupt": "interrupt"}
     inputs = event.get("tool_input", "")
     tool = event.get("tool_name", "")
-    action_type = event.get('action_type', '')
+    supplied_type = event.get('action_type', '')
+    action_type = normalize_action_type(supplied_type) if supplied_type else ''
     if not action_type and event.get('tool_use_id') and event.get('transcript_path'):
         # Codex records the native item type alongside the hook's tool ID.
         try:
@@ -233,9 +236,7 @@ def normalize(event):
                     item = payload.get('item', {})
                     if (payload.get('turn_id') == event.get('turn_id')
                             and item.get('id') == event['tool_use_id']):
-                        native_type = item.get('kind') if item.get('type') == 'Extension' else item.get('type')
-                        if isinstance(native_type, str):
-                            action_type = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', native_type).lower()
+                        action_type = action_type_for_item(item)
         except OSError:
             pass
     response = event.get("tool_response", "")

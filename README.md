@@ -42,6 +42,16 @@ The UI draws these connections from each session's ordered turn IDs, including
 pending actions, and combines them with stored edges without duplicates. These
 display connections do not create persistent action records.
 
+Newly saved interactions are summarized in order in a background worker using
+`ConversationMemoryTree.describe_interaction` and its inherited `default_llm_func`.
+This uses the configured default language model and the library's task extraction,
+step-progress, and final-response assessment prompts. Cards display the summary;
+the inspector retains the original evidence and includes the structured task
+progress details. Summaries are persisted by the library and restored when a chat
+loads. Pending tool calls wait for their result before being summarized. A failed
+summary leaves its node visible with a summary-unavailable status. Existing
+undescribed history is not automatically backfilled.
+
 Persistence uses your `dotvectordb.ConversationMemoryTree.ConversationMemoryTree`
 class from the installed PyPI package.
 

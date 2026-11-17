@@ -7,6 +7,20 @@ from events.events import normalize, patch_changes, FileSnapshots
 
 
 class EventTests(unittest.TestCase):
+    def test_dotted_action_types_use_library_names(self):
+        for action in ('search', 'open', 'find'):
+            raw = {'hook_event_name': 'PostToolUse', 'action_type': f'web.{action}'}
+            self.assertEqual(normalize(raw)['action_type'], f'web_{action}')
+            self.assertEqual(raw['action_type'], f'web.{action}')
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'conversation.jsonl'
+            transcript.write_text(json.dumps({'payload': {'turn_id': 'turn', 'item': {
+                'id': 'call', 'type': 'Extension', 'kind': 'web.search',
+            }}}) + '\n')
+            record = normalize({'hook_event_name': 'PostToolUse', 'turn_id': 'turn',
+                                'tool_use_id': 'call', 'transcript_path': str(transcript)})
+            self.assertEqual(record['action_type'], 'web_search')
+
     def test_native_message_ids_from_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / 'conversation.jsonl'
